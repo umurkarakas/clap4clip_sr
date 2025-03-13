@@ -1,10 +1,10 @@
-for BETA in 0.005 0.01 0.05 0.1 1 3 5 10
+for BETA in 0.005
 do
 for db_name in cifar100 imagenet-r
 do
-for forward_times in 20 40 80 120 160
+for forward_times in 120
 do
-for gamma in 0.0001 0.001 0.01 0.1
+for gamma in 0.1
 do
 for model in coop_variational_sr maple_variational_sr clclip_var_sr
 do
