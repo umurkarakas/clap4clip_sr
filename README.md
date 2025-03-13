@@ -1,4 +1,4 @@
-# Recent Updates: Scoring Rule Memory Consolidation
+# Scoring Rule for Memory Consolidation
 
 This extension was developed as part of the Foundation Models in Action seminar at LMU Munich during WiSe 24/25, exploring improvements to CLAP4CLIP's memory consolidation mechanism.
 
