@@ -1,3 +1,21 @@
+# Recent Updates: Scoring Rule Memory Consolidation
+
+This extension was developed as part of the Foundation Models in Action seminar at LMU Munich during WiSe 24/25, exploring improvements to CLAP4CLIP's memory consolidation mechanism.
+
+We have extended CLAP4CLIP with a scoring rule-based memory consolidation approach that improves performance across datasets:
+
+- **New Loss Function**: Replaced the knowledge distillation loss ($𝓛_{KD}$) with a scoring rule minimization loss ($𝓛_{SRM}$) for memory consolidation
+- **Improved Performance**: Achieved better accuracy on both CIFAR100 and ImageNet-R datasets:
+  - CIFAR100: +0.55% average accuracy, +0.45% last accuracy
+  - ImageNet-R: +0.92% average accuracy, +1.26% last accuracy
+
+The scoring rule approach maintains comparable backward transfer metrics while improving overall performance across different prompt learning methods (CoOp, MaPLe).
+
+In order to run CLAP4CLIP with new scoring rule based approach, please run:
+```
+bash scripts/clap4clip_sr.sh
+```
+
 <div align="center">
 
 # CLAP4CLIP: Continual Learning with Probabilistic Finetuning for Vision-Language Models [[Paper]](https://arxiv.org/pdf/2403.19137v2)
