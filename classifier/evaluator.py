@@ -33,12 +33,12 @@ class Evaluator():
 
     def compute_backward_transfer(self, curr_task_accs):
         bwt_scores = []
-        for t in range(len(curr_task_accs) -1):
+        for t in range(len(curr_task_accs) - 1):
             acc = curr_task_accs[t]
             bwt = acc - self.task_to_original_acc[t]
             bwt_scores.append(bwt)
         print(f"Average BWT score: {np.mean(bwt_scores)}")
-
+        return bwt_scores
 
     def mask_classes(self, outputs: torch.Tensor, k: int) -> None:
         """
@@ -213,10 +213,18 @@ class Evaluator():
             print(f"Acc avg: {np.mean(list(self.time_step_to_acc.values()))}, Acc last: {acc}")
             print(f"TaW Acc avg: {np.mean(list(self.time_step_to_taw_acc.values()))}, TaW Acc last: {acc_taw}")
 
-            if self.args.sess > 0 and self.args.compute_bwt:
-                self.compute_backward_transfer(accs)
+            metric_dict = {"acc_avg": np.mean(list(self.time_step_to_acc.values())),
+                    "acc_last": acc,
+                    "taw_acc_avg": np.mean(list(self.time_step_to_taw_acc.values())),
+                    "acc_taw": acc_taw,
+                    "ece_avg": torch.stack(calibration_errors).mean(),
+                    "inf_time_avg": np.mean(inference_times)}
             
-            return acc
+            if self.args.sess > 0 and self.args.compute_bwt:
+                bwt = self.compute_backward_transfer(accs)
+                metric_dict["bwt"] = np.mean(bwt)
+                
+            return metric_dict
 
     @torch.no_grad()
     def _accuracy_mpc(self, loader):

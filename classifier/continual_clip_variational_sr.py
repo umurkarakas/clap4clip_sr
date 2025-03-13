@@ -23,17 +23,60 @@ from .evaluator import Evaluator
 class Adapter(nn.Module):
     def __init__(self, in_dim, out_dim, sigma=False, layer_num=1):
         super().__init__()
-
+        
         self.fc = nn.Sequential(nn.Linear(in_dim, out_dim))
         self.sigma = sigma
-        # init_weights(self.fc)
 
     def forward(self, x):
         if self.sigma:
             return F.softplus(self.fc(x)) * 0.999 + 0.001
         else:
             return self.fc(x)
+
+class AdapterTwoLayer(nn.Module):
+    def __init__(self, in_dim, hidden_dim, out_dim, sigma=False, layer_num=1):
+        super().__init__()
         
+        self.fc1 = nn.Sequential(nn.Linear(in_dim, hidden_dim))
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Sequential(nn.Linear(hidden_dim, out_dim))
+        
+        self.sigma = sigma
+
+    def forward(self, x):
+        if self.sigma:
+            return F.softplus(self.fc2(self.relu(self.fc1(x)))) * 0.999 + 0.001
+        else:
+            return self.fc2(self.relu(self.fc1(x)))
+
+class AdapterTransformer(nn.Module):
+    def __init__(self, in_dim, out_dim, sigma=False, num_heads=4, dim_feedforward=2048, num_layers=1):
+        super().__init__()
+        
+        self.encoder_layer = nn.TransformerEncoderLayer(
+            d_model=in_dim,
+            nhead=num_heads,
+            dim_feedforward=dim_feedforward,
+            activation='relu'
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            self.encoder_layer,
+            num_layers=num_layers
+        )
+        
+        self.fc = nn.Linear(in_dim, out_dim)
+        self.sigma = sigma
+
+    def forward(self, x):
+        x = self.transformer_encoder(x)
+        
+        x = self.fc(x)
+        
+        if self.sigma:
+            return F.softplus(x) * 0.999 + 0.001
+        else:
+            return x
+            
 class TextEncoder(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
@@ -310,7 +353,6 @@ class CLIP(nn.Module):
                 return logits, (None,None)
 
         else:
-            
             text_features = self.frozen_text_features
             logits =[]
             kl_losses = []
@@ -338,7 +380,7 @@ class CLIP(nn.Module):
                                                 )
                 qdist_g = self.get_variational_adapter_features(global_input_features, global_adapter=True)
                 # pdist_g = self.get_prior_dist(text_features=global_input_features, use_np_prior=False)
-                prior_matching_losses.append(kl_divergence(qdist_g, pdist_g).mean(0).sum() * 0.001)
+                prior_matching_losses.append(kl_divergence(qdist_g, pdist_g).mean(0).sum() * args.gamma)
                 rsamples_g = qdist_g.rsample([self.forward_times_global])
                 if self.args.lasp  and self.args.beta > 0:
                     prior_text_features = self.frozen_text_features_individual.clone()
@@ -364,8 +406,7 @@ class CLIP(nn.Module):
             per_sample_text_feats = []
             taskwise_means = []
 
-            for i in range(self.args.sess+1):
-                
+            for i in range(self.args.sess+1):   
                 start_cls_idx = end_cls_idx
                 end_cls_idx += self.task_to_cls_num[i]
                 if start_cls_idx not in self.class_to_task_mapping:
@@ -383,20 +424,28 @@ class CLIP(nn.Module):
 
                 if self.args.hierarchical:
                     text_features_ = text_features_.unsqueeze(0).expand(self.forward_times_global, -1, -1) + rsamples_g[:, start_cls_idx:end_cls_idx, :]
-                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)
+
+                qdist = self.get_variational_adapter_features(text_features_, i if self.args.expandable_adapter else 0)    
+        
                 rsamples = qdist.rsample([self.forward_times])
                 text_features_ = text_features_.unsqueeze(0).expand(self.forward_times, -1, -1, -1) if self.args.hierarchical else text_features_.unsqueeze(0).expand(self.forward_times, -1, -1)
                 if self.args.hierarchical:
                     rsamples = rsamples.flatten(0, 1)
                     text_features_ = text_features_.flatten(0, 1)
                 text_features_ = rsamples + text_features_ 
-                
                 taskwise_means.append(rsamples.mean(0))
-                if self.args.lasp  and self.args.beta > 0 and (finetuning or (not finetuning and  self.args.sess == i)):
+                
+                if self.args.lasp and self.args.beta > 0 and (finetuning or (not finetuning and  self.args.sess == i)):
                     prior_text_features = self.frozen_text_features_individual.clone()[start_cls_idx:end_cls_idx]
-                    sims = torch.stack([prior_text_features @ rsamples[r].t() for r in range(rsamples.shape[0])], 0)
-                    sims = sims.mean(2).mean(0)
-                    kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * self.args.beta)
+                    #print(rsamples.shape, prior_text_features.shape)
+                    energy_score = 2 * 0.5 * torch.stack([torch.norm(rsamples[r].unsqueeze(1) - prior_text_features, dim=-1, p=2) for r in range(rsamples.size(0))]).mean()
+                    rsamples_ = rsamples.type(torch.float32)
+                    rsamples_ = rsamples_.permute(1,0,2)
+                    pairwise_distances = torch.cdist(rsamples_, rsamples_, p=2)
+                    mask = torch.eye(pairwise_distances.size(1), dtype=torch.bool, device=pairwise_distances.device)
+                    pairwise_distances = pairwise_distances.masked_fill(mask, 0)
+                    kernel_score = -0.5 * pairwise_distances.mean()
+                    kl_losses.append((energy_score + kernel_score) * self.args.sr_beta)
                 logits_ = (logit_scale * image_features_normed @ text_features_.permute(0, 2, 1)) 
                 if finetuning or (not finetuning and self.args.sess == i):
                     if self.args.frozen_prior:
@@ -409,7 +458,7 @@ class CLIP(nn.Module):
                                                 use_np_prior=self.args.use_np_prior, #if not finetuning else False,
                                                 tgt_mask=attn_mask
                                                 )
-                    prior_matching_losses.append(kl_divergence(qdist, pdist).mean(0).sum() * 0.001)    
+                    prior_matching_losses.append(kl_divergence(qdist, pdist).mean(0).sum() * self.args.gamma)    
                 
                 logits.append(logits_)
                 if (self.args.get_interclass_dist and self.args.sess == 9 and finetuning) or (self.args.get_adapter_distances and self.args.sess > 0):
@@ -424,7 +473,6 @@ class CLIP(nn.Module):
                 kl_losses.append(F.cross_entropy(sims,  torch.arange(sims.size(0)).cuda(device=self.args.default_gpu)) * 5)
                 
             logits = torch.cat(logits, -1)
-           
             kl_loss = sum(kl_losses)  if len(kl_losses) else 0.
             prior_matching_loss = sum(prior_matching_losses) 
             # prior_matching_loss = prior_matching_loss * 0.01 #if not finetuning else prior_matching_loss * 0.1 
@@ -444,7 +492,7 @@ class CLIP(nn.Module):
                             self.classwise_centroids[label] = per_sample_text_feats_[label].unsqueeze(0)
                         else:
                             self.classwise_centroids[label] = torch.cat([self.classwise_centroids[label], per_sample_text_feats_[label].unsqueeze(0)], 0)
-                  
+            
             return logits, (kl_loss, prior_matching_loss, avg_cos_distance)
 
     def get_kld_loss(self, logits, logits_prior):
@@ -479,11 +527,11 @@ class CLIP(nn.Module):
         return self.image_encoder.conv1.weight.dtype #return int/float
 
 
-class ClClipVariational(Evaluator):
+class ClClipVariationalSR(Evaluator):
     def __init__(self, args, use_float32=False, use_grad_checkpoint=False):
         super().__init__(args)
         self.args = args
-        clip_model, _ = load(args.ckpt_path, device=f"cuda:{args.default_gpu}")
+        clip_model, _ = load(args.arch, device=f"cuda:{args.default_gpu}")
         clip_model.eval()
         if use_float32:
             clip_model.float()
@@ -591,6 +639,7 @@ class ClClipVariational(Evaluator):
                         output = output.view(-1, output.shape[-1])
                     else:
                         targets = y 
+                    #print(F.cross_entropy(output,targets), kl_loss, prior_matching_loss)
                     loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
                     self.optimizer.zero_grad()
                     loss.backward()
@@ -638,7 +687,7 @@ class ClClipVariational(Evaluator):
         self.unfreeze_for_finetuning()
         self.cur_iter_idx = 0
         memory_loader = data['memory_loader']
-        if len(memory_loader.dataset)< self.train_batch:
+        if len(memory_loader.dataset) < self.train_batch:
             real_img_bsz = len(memory_loader.dataset)
             self.lr = self.lr * real_img_bsz / self.train_batch 
         else:
@@ -666,6 +715,7 @@ class ClClipVariational(Evaluator):
                     output = output.view(-1, output.shape[-1])
                 else:
                     targets = y 
+                #print(F.cross_entropy(output,targets), kl_loss, prior_matching_loss)
                 loss = loss + F.cross_entropy(output, targets) + kl_loss + prior_matching_loss
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -778,7 +828,7 @@ class ClClipVariational(Evaluator):
             if param.requires_grad:
                 enabled.add(name)
 
-        print(f"\nParameters to be updated: {sorted(enabled)}\n")
+        #print(f"\nParameters to be updated: {sorted(enabled)}\n")
 
         param_dict = [{'params': [p for p in self.model.parameters() if p.requires_grad]}]
 
@@ -793,7 +843,7 @@ class ClClipVariational(Evaluator):
             )
         
     @torch.no_grad()
-    def inference(self,image, label, num_test, test_class):
+    def inference(self, image, label, num_test, test_class):
         self.model.eval()
         logits, feats = self.model(image, label, test=True, return_mean=False)
         return logits.float(), feats

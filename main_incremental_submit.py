@@ -11,10 +11,15 @@ from classifier.continual_clip_variational import ClClipVariational
 from classifier.coop_variational import CoOpVariational
 from classifier.coop_adapter import CoOpAdapter
 from classifier.maple_variational import MaPLe_var
+from classifier.continual_clip_variational_sr import ClClipVariationalSR
+from classifier.coop_variational_sr import CoOpVariationalSR
+from classifier.maple_variational_sr import MaPLe_varSR
+
 import dataset.incremental_dataloader as incremental_dataloader
 from utils import mkdir_p
 from dataset.exemplars_selection import *
 from utils.rotation_angle_matrix import RotationAngleMatrix
+from torch.utils.tensorboard import SummaryWriter
 
 def parse_option():
     parser = argparse.ArgumentParser('Prompt Learning for CLIP', add_help=False)
@@ -91,7 +96,7 @@ def parse_option():
     parser.add_argument("--compute-ece", action='store_true', default=False, help="Compute Expected Calibration Error")
     parser.add_argument("--num-run", default=0, type=int, help="number of run decides the class order for cifar100 and seed for imagenet100" )
     parser.add_argument("--get-adapter-distances", action='store_true', default=False, help="average distance between samples of each adapter")
-
+    parser.add_argument("--sr-beta", type=float, default=1, help="SR beta")
     parser.add_argument("--forward-times", type=int, default=10, help="MC samples")
     parser.add_argument("--forward-times-global", type=int, default=10, help="global MC samples")
     parser.add_argument("--hierarchical", action='store_true', default=False, help="use a global encoder")
@@ -111,7 +116,7 @@ def parse_option():
     args.mean_per_class = False
 
     if args.ckpt_path is None:
-       args.ckpt_path = 'ckpt/{}.pt'.format(args.arch)
+       args.ckpt_path = args.arch
 
     args.save_path = args.save_path + '/' + args.db_name
     args.seed = args.num_run
@@ -147,6 +152,12 @@ def main(args):
         model = CoOpVariational(args)
     elif args.model == "maple_variational":
         model = MaPLe_var(args)
+    elif args.model == "clclip_var_sr":
+        model = ClClipVariationalSR(args)
+    elif args.model == "coop_variational_sr":
+        model = CoOpVariationalSR(args)
+    elif args.model == "maple_variational_sr":
+        model = MaPLe_varSR(args)
     else:
         raise NotImplementedError
 
@@ -200,9 +211,13 @@ def main(args):
                     )
     start_sess = args.start_sess
     memory = None
-    
-    ctx_vec=None
+    ctx_vec = None
     print(args)
+    folder_path = f"./runs/log_{args.model}_{args.db_name}_{args.sr_beta}_{args.gamma}_{args.forward_times}"
+    if os.path.exists(folder_path):
+        return
+    writer = SummaryWriter(folder_path)
+    #writer = SummaryWriter(f"./runs/log_{args.db_name}_original_model")
     for ses in range(start_sess,  args.num_task):
         if ses > args.start_sess:
             if "er" in args.method:
@@ -242,12 +257,14 @@ def main(args):
         model.post_training(finalize=True)
         print('finish fit')
         
-        acc = model.accuracy(test_loader, args.num_test, test_class, mean_per_class=args.mean_per_class, ood_test_loader=ood_test_loader)
+        metrics = model.accuracy(test_loader, args.num_test, test_class, mean_per_class=args.mean_per_class, ood_test_loader=ood_test_loader)
+        for k,v in metrics.items():
+            writer.add_scalar(k, v, ses)
         with open(args.save_path + "/memory_"+str(args.sess)+".pickle", 'wb') as handle:
             pickle.dump(memory, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         with open(args.save_path + "/acc_task_"+str(args.sess)+".pickle", 'wb') as handle:
-            pickle.dump(acc, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(metrics["acc_last"], handle, protocol=pickle.HIGHEST_PROTOCOL)
             
         with open(args.save_path + "/sample_per_task_testing_"+str(args.sess)+".pickle", 'wb') as handle:
             pickle.dump(args.sample_per_task_testing, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -255,7 +272,8 @@ def main(args):
     if args.viz_module_selection:
         with open(args.save_path + "/module_selection_trend.pickle", 'wb') as handle:
             pickle.dump(model.time_step_to_test_id_to_module_id, handle, protocol=pickle.HIGHEST_PROTOCOL)
-        
+            
+    writer.flush()
 
 if __name__ == '__main__':
     args = parse_option()
